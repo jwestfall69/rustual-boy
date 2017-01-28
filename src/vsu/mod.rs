@@ -210,6 +210,87 @@ impl Voice for StandardVoice {
 }
 
 #[derive(Default)]
+struct SweepModVoice {
+    reg_play_control: PlayControlReg,
+
+    reg_volume: VolumeReg,
+
+    reg_frequency_low: usize,
+    reg_frequency_high: usize,
+
+    envelope: Envelope,
+
+    reg_pcm_wave: usize,
+
+    frequency_counter: usize,
+    phase: usize,
+}
+
+impl SweepModVoice {
+    fn write_play_control_reg(&mut self, value: u8) {
+        self.reg_play_control.write(value);
+
+        if self.reg_play_control.enable {
+            self.envelope.envelope_counter = 0;
+
+            self.frequency_counter = 0;
+            self.phase = 0;
+        }
+    }
+
+    fn write_volume_reg(&mut self, value: u8) {
+        self.reg_volume.write(value);
+    }
+
+    fn write_frequency_low_reg(&mut self, value: u8) {
+        self.reg_frequency_low = value as _;
+    }
+
+    fn write_frequency_high_reg(&mut self, value: u8) {
+        self.reg_frequency_high = (value & 0x07) as _;
+    }
+
+    fn write_envelope_data_reg(&mut self, value: u8) {
+        self.envelope.write_data_reg(value);
+    }
+
+    fn write_envelope_control_reg(&mut self, value: u8) {
+        self.envelope.write_control_reg(value);
+    }
+
+    fn write_pcm_wave_reg(&mut self, value: u8) {
+        self.reg_pcm_wave = (value & 0x07) as _;
+    }
+
+    fn frequency_clock(&mut self) {
+        self.frequency_counter += 1;
+        if self.frequency_counter >= 2048 - ((self.reg_frequency_high << 8) | self.reg_frequency_low) {
+            self.frequency_counter = 0;
+
+            self.phase = (self.phase + 1) & (NUM_WAVE_TABLE_WORDS - 1);
+        }
+    }
+
+    fn output(&self, wave_tables: &[u8]) -> usize {
+        wave_tables[self.reg_pcm_wave * NUM_WAVE_TABLE_WORDS + self.phase] as _
+    }
+}
+
+impl Voice for SweepModVoice {
+    fn reg_play_control(&self) -> &PlayControlReg {
+        &self.reg_play_control
+    }
+
+    fn reg_volume(&self) -> &VolumeReg {
+        &self.reg_volume
+    }
+
+    fn envelope(&self) -> &Envelope {
+        &self.envelope
+    }
+}
+
+#[derive(Default)]
 struct NoiseVoice {
     reg_play_control: PlayControlReg,
 
@@ -318,7 +399,7 @@ pub struct Vsu {
     voice2: StandardVoice,
     voice3: StandardVoice,
     voice4: StandardVoice,
-    voice5: StandardVoice,
+    voice5: SweepModVoice,
     voice6: NoiseVoice,
 
     duration_clock_counter: usize,
@@ -338,7 +419,7 @@ impl Vsu {
             voice2: StandardVoice::default(),
             voice3: StandardVoice::default(),
             voice4: StandardVoice::default(),
-            voice5: StandardVoice::default(),
+            voice5: SweepModVoice::default(),
             voice6: NoiseVoice::default(),
 
             duration_clock_counter: 0,
