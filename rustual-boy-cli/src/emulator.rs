@@ -9,6 +9,7 @@ use rustual_boy_core::sram::Sram;
 use rustual_boy_core::instruction::*;
 use rustual_boy_core::game_pad::Button;
 use rustual_boy_core::virtual_boy::VirtualBoy;
+use rustual_boy_core::v810::TraceEntry;
 
 use rustual_boy_middleware::{Anaglyphizer, GammaAdjustSink, MostRecentSink};
 
@@ -214,6 +215,7 @@ impl Emulator {
                     println!("eipc: 0x{:08x}", self.virtual_boy.cpu.reg_eipc());
                     println!("eipsw: 0x{:08x}", self.virtual_boy.cpu.reg_eipsw());
                     println!("ecr: 0x{:08x}", self.virtual_boy.cpu.reg_ecr());
+                    println!("chcw: 0x{:08x}", self.virtual_boy.cpu.reg_chcw());
                 }
                 Ok(Command::ShowCpuCache) => {
                     println!("CPU Instruction Cached enable: {}", self.virtual_boy.cpu.cache.is_enabled());
@@ -226,13 +228,41 @@ impl Emulator {
                 },
                 Ok(Command::Step(count)) => {
                     for _ in 0..count {
+                        self.disassemble_instruction();
                         self.step(video_frame_sink, audio_frame_sink);
                         self.cursor = self.virtual_boy.cpu.reg_pc();
-                        self.disassemble_instruction();
+
+                        if self.virtual_boy.cpu.is_trace_enabled() {
+                            for trace_entry in &self.virtual_boy.cpu.trace_entries {
+                                print!("    ");
+                                match *trace_entry {
+                                    TraceEntry::CpuCycles(num_cycles) => println!("  cpu cycles: {}", num_cycles),
+                                    TraceEntry::GprRead(reg, data ) => println!("    read r{:02}: 0x{:08x}", reg, data),
+                                    TraceEntry::GprWrite(reg, pre_data, post_data) => println!("   write r{:02}: 0x{:08x} => 0x{:08x}", reg, pre_data, post_data),
+                                    TraceEntry::MemReadByte(addr, data) => println!("  read mem.b: addr: 0x{:08x}, data: 0x{:02x}", addr, data),
+                                    TraceEntry::MemReadHalfword(addr, data) => println!("  read mem.h: addr: 0x{:08x}, data: 0x{:04x}", addr, data),
+                                    TraceEntry::MemReadWord(addr, data) => println!("  read mem.w: addr: 0x{:08x}, data: 0x{:08x}", addr, data),
+                                    TraceEntry::MemWriteByte(addr, pre_read, written, post_read) => println!(" write mem.b: addr: 0x{:08x}, before: 0x{:02x}, written: 0x{:02x}, after: 0x{:02x}", addr, pre_read, written, post_read),
+                                    TraceEntry::MemWriteHalfword(addr, pre_read, written, post_read) => println!(" write mem.h: addr: 0x{:08x}, before: 0x{:04x}, written: 0x{:04x}, after: 0x{:04x}", addr, pre_read, written, post_read),
+                                    TraceEntry::MemWriteWord(addr, pre_read, written, post_read) => println!(" write mem.w: addr: 0x{:08x}, before: 0x{:08x}, written: 0x{:08x}, after: 0x{:08x}", addr, pre_read, written, post_read),
+                                    TraceEntry::Pc(pre_data, post_data) => println!("    write PC: 0x{:08x} => 0x{:08x} ({})", pre_data, post_data, (post_data - pre_data) as i32),
+                                    TraceEntry::Psw(pre_data, post_data) => println!("         PSW: 0x{:08x} => 0x{:08x}", pre_data, post_data),
+                                    TraceEntry::SignedDisp16(disp16) => println!("    disp i16: 0x{:04x} ({})", disp16, disp16),
+                                    TraceEntry::SignedImm5(imm5) => println!("      imm i5: 0x{:02x} ({})", imm5, imm5),
+                                    TraceEntry::SignedImm16(imm16) => println!("     imm i16: 0x{:04x}, ({})", imm16, imm16),
+                                    TraceEntry::SysRegRead(reg, data) => println!(" read sysr{:02}: 0x{:08x}", reg, data),
+                                    TraceEntry::SysRegWrite(reg, pre_read, written, post_read) => println!("write sysr{:02}: before: 0x{:08x}, written: 0x{:08x}, after: 0x{:08x}", reg, pre_read, written, post_read),
+                                    TraceEntry::UnsignedDisp32(disp32) => println!("    disp u32: 0x{:08x} ({})", disp32, disp32),
+                                    TraceEntry::UnsignedImm5(imm5) => println!("      imm u5: 0x{:02x} ({})", imm5, imm5),
+                                    TraceEntry::UnsignedImm16(imm16) => println!("     imm u16: 0x{:04x}, ({})", imm16, imm16),
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(Command::Continue) => {
                     self.mode = Mode::Running;
+                    self.virtual_boy.cpu.set_trace_enabled(false);
                     self.time_source_start_time_ns = self.time_source.time_ns() - (self.emulated_cycles * CPU_CYCLE_TIME_NS);
                 }
                 Ok(Command::Goto(addr)) => {
@@ -266,6 +296,7 @@ impl Emulator {
                     }
                 }
                 Ok(Command::Label) => {
+                    self.virtual_boy.cpu.request_interrupt(0xfe10);
                     for (name, addr) in self.labels.iter() {
                         println!(".{}: 0x{:08x}", name, addr);
                     }
@@ -302,6 +333,15 @@ impl Emulator {
                 Ok(Command::RemoveWatchpoint(addr)) => {
                     if !self.virtual_boy.cpu.watchpoints.remove(&addr) {
                         println!("Watchpoint at 0x{:08x} does not exist", addr);
+                    }
+                }
+                Ok(Command::CpuTrace) => {
+                    if cfg!(feature = "cpu-trace") {
+                        let trace_enabled = self.virtual_boy.cpu.is_trace_enabled();
+                        self.virtual_boy.cpu.set_trace_enabled(!trace_enabled);
+                        println!("cpu trace enabled: {}", !trace_enabled);
+                    } else {
+                        println!("cputrace requires --features cpu-trace");
                     }
                 }
                 Ok(Command::Exit) => {
