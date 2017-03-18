@@ -1,3 +1,21 @@
+/*
+    TODO hw tests
+    1. If you disable the timer and clear zero in the same write, while 
+       counter == 0, does zero status get cleared?  The docs say you 
+       shouldnt do this, but what actually happens when you do.
+    2. Additional testing with disable/enable timer when the counter is 0
+       In some hw tests the counter seems to get instantly set to the 
+       reload value on timer disable, other times it almost seems like 
+       a random number between 0 and the reload value.
+    3. Its been shown that doing disable int, clear zero, enable int vs
+       disable timer, enable timer doesnt result in the same fire time 
+       for the next interrupt.  The later seems to fire early by about
+       10us.  Need to do additional testing on this, its probably  
+       related to #2
+    4. Not really timer specific but try to measure how long it takes to
+       enter an exception
+*/
+
 // 20mhz / (1s / 100us) = 2000
 const LARGE_INTERVAL_PERIOD: usize = 2000;
 
@@ -29,7 +47,7 @@ impl Timer {
             zero_status: false,
             enable: false,
             reload: 0,
-            counter: 0,
+            counter: 0xffff,
 
             tick_counter: 0,
             zero_interrupt: false,
@@ -37,6 +55,7 @@ impl Timer {
     }
 
     pub fn read_control_reg(&self) -> u8 {
+        0xe4 |
         (match self.interval {
             Interval::Large => 0,
             Interval::Small => 1,
@@ -54,7 +73,9 @@ impl Timer {
         };
         self.zero_interrupt_enable = ((value >> 3) & 0x01) != 0;
         if ((value >> 2) & 0x01) != 0 {
-            self.zero_status = false;
+            if !self.enable || self.counter != 0 {
+                self.zero_status = false;
+            }
         }
         if !self.zero_interrupt_enable || !self.zero_status {
             self.zero_interrupt = false;
@@ -68,7 +89,8 @@ impl Timer {
 
     pub fn write_counter_reload_low_reg(&mut self, value: u8) {
         self.reload = (self.reload & 0xff00) | (value as u16);
-        self.counter = self.reload;
+        let new_counter = self.reload;
+        self.update_counter(new_counter);
     }
 
     pub fn read_counter_reload_high_reg(&self) -> u8 {
@@ -77,7 +99,18 @@ impl Timer {
 
     pub fn write_counter_reload_high_reg(&mut self, value: u8) {
         self.reload = ((value as u16) << 8) | (self.reload & 0xff);
-        self.counter = self.reload;
+        let new_counter = self.reload;
+        self.update_counter(new_counter);
+    }
+
+    fn update_counter(&mut self, value: u16) {
+        if self.counter != 0 && value == 0 {
+            self.zero_status = true;
+            if self.zero_interrupt_enable {
+                self.zero_interrupt = true;
+            }
+        }
+        self.counter = value;
     }
 
     pub fn cycles(&mut self, cycles: usize) -> bool {
@@ -91,16 +124,11 @@ impl Timer {
                 if self.tick_counter >= tick_period {
                     self.tick_counter = 0;
 
-                    self.counter = match self.counter {
-                        0 => {
-                            self.zero_status = true;
-                            if self.zero_interrupt_enable {
-                                self.zero_interrupt = true;
-                            }
-                            self.reload
-                        }
-                        _ => self.counter - 1
+                    let new_counter = match self.counter {
+                        0 => self.reload,
+                        _ => self.counter - 1,
                     };
+                    self.update_counter(new_counter);
                 }
             }
         }
